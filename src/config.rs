@@ -17,6 +17,10 @@ pub struct Config {
     pub refresh_token_public_key: String,
     pub refresh_token_expires_in: String,
     pub refresh_token_max_age: i64,
+
+    pub google_oauth_client_id: String,
+    pub google_oauth_client_secret: String,
+    pub google_oauth_redirect_url: String,
 }
 
 impl Config {
@@ -35,6 +39,13 @@ impl Config {
         let refresh_token_expires_in = get_env_var("REFRESH_TOKEN_EXPIRED_IN");
         let refresh_token_max_age = get_env_var("REFRESH_TOKEN_MAXAGE");
 
+        let google_oauth_client_id =
+            std::env::var("GOOGLE_OAUTH_CLIENT_ID").expect("GOOGLE_OAUTH_CLIENT_ID must be set");
+        let google_oauth_client_secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET")
+            .expect("GOOGLE_OAUTH_CLIENT_SECRET must be set");
+        let google_oauth_redirect_url = std::env::var("GOOGLE_OAUTH_REDIRECT_URL")
+            .expect("GOOGLE_OAUTH_REDIRECT_URL must be set");
+
         Config {
             database_url,
             redis_url,
@@ -47,6 +58,9 @@ impl Config {
             refresh_token_expires_in,
             access_token_max_age: access_token_max_age.parse::<i64>().unwrap(),
             refresh_token_max_age: refresh_token_max_age.parse::<i64>().unwrap(),
+            google_oauth_client_id,
+            google_oauth_client_secret,
+            google_oauth_redirect_url,
         }
     }
 }

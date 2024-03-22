@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use argon2::{password_hash::SaltString, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::{
-    extract::State,
+    debug_handler,
+    extract::{Query, State},
     http::{header, HeaderMap, Response, StatusCode},
     response::IntoResponse,
     Extension, Json,
@@ -15,10 +16,14 @@ use rand_core::OsRng;
 use serde_json::json;
 
 use crate::{
-    jwt_auth::JWTAuthMiddleware,
+    error::Error,
     model::{LoginUserSchema, RegisterUserSchema, User},
-    response::FilteredUser,
-    token::{self, TokenDetails},
+    utils::auth::{
+        append_cookies_to_headers, auth_first, filter_user_record, generate_token,
+        save_token_data_to_redis, JWTAuthMiddleware,
+    },
+    utils::google_oauth::{get_google_user, request_token, QueryCode},
+    utils::token,
     AppState,
 };
 
@@ -38,58 +43,37 @@ pub async fn health_checker_handler() -> impl IntoResponse {
 pub async fn register_user_handler(
     State(data): State<Arc<AppState>>,
     Json(body): Json<RegisterUserSchema>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<impl IntoResponse, Error> {
+    // email로 user검색
     let user_exists: Option<bool> =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
             .bind(body.email.to_owned().to_ascii_lowercase())
             .fetch_one(&data.db)
             .await
-            .map_err(|e| {
-                let error_response = serde_json::json!({
-                    "status": "fail",
-                    "message": format!("Database error: {}", e),
-                });
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-            })?;
-
+            .map_err(|e| Error::DatabaseError(e))?;
     if let Some(exists) = user_exists {
         if exists {
-            let error_response = serde_json::json!({
-                "status": "fail",
-                "message": "User with that email already exists",
-            });
-            return Err((StatusCode::CONFLICT, Json(error_response)));
+            return Err(Error::UserAlreadyExists);
         }
     }
 
     let salt = SaltString::generate(&mut OsRng);
     let hashed_password = Argon2::default()
         .hash_password(body.password.as_bytes(), &salt)
-        .map_err(|e| {
-            let error_response = serde_json::json!({
-                "status": "fail",
-                "message": format!("Error while hashing password: {}", e),
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        })
+        .map_err(|e| Error::CannotHashPassword(e))
         .map(|hash| hash.to_string())?;
 
+    // user 등록
     let user = sqlx::query_as!(
         User,
         "INSERT INTO users (name,email,password) VALUES ($1, $2, $3) RETURNING *",
         body.name.to_string(),
         body.email.to_string().to_ascii_lowercase(),
-        hashed_password
+        hashed_password,
     )
     .fetch_one(&data.db)
     .await
-    .map_err(|e| {
-        let error_response = serde_json::json!({
-            "status": "fail",
-            "message": format!("Database error: {}", e),
-        });
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-    })?;
+    .map_err(|e| Error::DatabaseError(e))?;
 
     let user_response = serde_json::json!({"status": "success","data": serde_json::json!({
         "user": filter_user_record(&user)
@@ -101,7 +85,7 @@ pub async fn register_user_handler(
 pub async fn login_user_handler(
     State(data): State<Arc<AppState>>,
     Json(body): Json<LoginUserSchema>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<impl IntoResponse, Error> {
     let user = sqlx::query_as!(
         User,
         "SELECT * FROM users WHERE email = $1",
@@ -109,20 +93,12 @@ pub async fn login_user_handler(
     )
     .fetch_optional(&data.db)
     .await
-    .map_err(|e| {
-        let error_response = serde_json::json!({
-            "status": "error",
-            "message": format!("Database error: {}", e),
-        });
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-    })?
-    .ok_or_else(|| {
-        let error_response = serde_json::json!({
-            "status": "fail",
-            "message": "Invalid email or password",
-        });
-        (StatusCode::BAD_REQUEST, Json(error_response))
-    })?;
+    .map_err(|e| Error::DatabaseError(e))?
+    .ok_or_else(|| Error::InvalidLoginInfo)?;
+
+    if user.provider != "local" {
+        return Err(Error::WrongUserProvider);
+    }
 
     let is_valid = match PasswordHash::new(&user.password) {
         Ok(parsed_hash) => Argon2::default()
@@ -132,107 +108,29 @@ pub async fn login_user_handler(
     };
 
     if !is_valid {
-        let error_response = serde_json::json!({
-            "status": "fail",
-            "message": "Invalid email or password"
-        });
-        return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+        return Err(Error::InvalidLoginInfo);
     }
 
-    let access_token_details = generate_token(
-        user.id,
-        data.env.access_token_max_age,
-        data.env.access_token_private_key.to_owned(),
-    )?;
-    let refresh_token_details = generate_token(
-        user.id,
-        data.env.refresh_token_max_age,
-        data.env.refresh_token_private_key.to_owned(),
-    )?;
+    let response = auth_first(user, &data).await?;
 
-    save_token_data_to_redis(&data, &access_token_details, data.env.access_token_max_age).await?;
-    save_token_data_to_redis(
-        &data,
-        &refresh_token_details,
-        data.env.refresh_token_max_age,
-    )
-    .await?;
-
-    let access_cookie = Cookie::build(
-        "access_token",
-        access_token_details.token.clone().unwrap_or_default(),
-    )
-    .path("/")
-    .max_age(time::Duration::minutes(data.env.access_token_max_age * 60))
-    .same_site(SameSite::Lax)
-    .http_only(true)
-    .finish();
-    let refresh_cookie = Cookie::build(
-        "refresh_token",
-        refresh_token_details.token.unwrap_or_default(),
-    )
-    .path("/")
-    .max_age(time::Duration::minutes(data.env.refresh_token_max_age * 60))
-    .same_site(SameSite::Lax)
-    .http_only(true)
-    .finish();
-
-    let logged_in_cookie = Cookie::build("logged_in", "true")
-        .path("/")
-        .max_age(time::Duration::minutes(data.env.access_token_max_age * 60))
-        .same_site(SameSite::Lax)
-        .http_only(false)
-        .finish();
-
-    let mut response = Response::new(
-        json!({"status": "success", "access_token": access_token_details.token.unwrap()})
-            .to_string(),
-    );
-    let mut headers = HeaderMap::new();
-    headers.append(
-        header::SET_COOKIE,
-        access_cookie.to_string().parse().unwrap(),
-    );
-    headers.append(
-        header::SET_COOKIE,
-        refresh_cookie.to_string().parse().unwrap(),
-    );
-    headers.append(
-        header::SET_COOKIE,
-        logged_in_cookie.to_string().parse().unwrap(),
-    );
-
-    response.headers_mut().extend(headers);
     Ok(response)
 }
 
 pub async fn refresh_access_token_handler(
     cookie_jar: CookieJar,
     State(data): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let message = "could not refresh access token";
-
+) -> Result<impl IntoResponse, Error> {
     let refresh_token = cookie_jar
         .get("refresh_token")
         .map(|cookie| cookie.value().to_string())
-        .ok_or_else(|| {
-            let error_response = serde_json::json!({
-                "status": "fail",
-                "message": message
-            });
-            (StatusCode::FORBIDDEN, Json(error_response))
-        })?;
+        .ok_or_else(|| Error::RefreshTokenError)?;
 
     let refresh_token_details =
         match token::verify_jwt_token(data.env.refresh_token_public_key.to_owned(), &refresh_token)
         {
             Ok(token_details) => token_details,
             Err(e) => {
-                let error_response = serde_json::json!({
-                    "status": "fail",
-                    "message": format_args!("{:?}", e)
-                });
-                return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
+                return Err(Error::TokenDetailsError(e));
             }
         };
 
@@ -240,51 +138,22 @@ pub async fn refresh_access_token_handler(
         .redis_client
         .get_async_connection()
         .await
-        .map_err(|e| {
-            let error_response = serde_json::json!({
-                "status": "error",
-                "message": format!("Redis error: {}", e),
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        })?;
+        .map_err(|e| Error::RedisError(e))?;
 
     let redis_token_user_id = redis_client
         .get::<_, String>(refresh_token_details.token_uuid.to_string())
         .await
-        .map_err(|_| {
-            let error_response = serde_json::json!({
-                "status": "error",
-                "message": "Token is invalid or session has expired",
-            });
-            (StatusCode::UNAUTHORIZED, Json(error_response))
-        })?;
+        .map_err(|_| Error::InvalidToken)?;
 
-    let user_id_uuid = uuid::Uuid::parse_str(&redis_token_user_id).map_err(|_| {
-        let error_response = serde_json::json!({
-            "status": "error",
-            "message": "Token is invalid or session has expired",
-        });
-        (StatusCode::UNAUTHORIZED, Json(error_response))
-    })?;
+    let user_id_uuid =
+        uuid::Uuid::parse_str(&redis_token_user_id).map_err(|_| Error::InvalidToken)?;
 
     let user = sqlx::query_as!(User, "SELECT * FROM users WHERE id = $1", user_id_uuid)
         .fetch_optional(&data.db)
         .await
-        .map_err(|e| {
-            let error_response = serde_json::json!({
-                "status": "fail",
-                "message": format!("Error fetching user from database: {}", e),
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        })?;
+        .map_err(|e| Error::FetchError(e))?;
 
-    let user = user.ok_or_else(|| {
-        let error_response = serde_json::json!({
-            "status": "fail",
-            "message": "The user belonging to this token no longer exists".to_string(),
-        });
-        (StatusCode::UNAUTHORIZED, Json(error_response))
-    })?;
+    let user = user.ok_or_else(|| Error::NoUser)?;
 
     let access_token_details = generate_token(
         user.id,
@@ -294,22 +163,20 @@ pub async fn refresh_access_token_handler(
 
     save_token_data_to_redis(&data, &access_token_details, data.env.access_token_max_age).await?;
 
-    let access_cookie = Cookie::build(
+    let access_cookie = Cookie::build((
         "access_token",
         access_token_details.token.clone().unwrap_or_default(),
-    )
+    ))
     .path("/")
     .max_age(time::Duration::minutes(data.env.access_token_max_age * 60))
     .same_site(SameSite::Lax)
-    .http_only(true)
-    .finish();
+    .http_only(true);
 
-    let logged_in_cookie = Cookie::build("logged_in", "true")
+    let logged_in_cookie = Cookie::build(("logged_in", "true"))
         .path("/")
         .max_age(time::Duration::minutes(data.env.access_token_max_age * 60))
         .same_site(SameSite::Lax)
-        .http_only(false)
-        .finish();
+        .http_only(false);
 
     let mut response = Response::new(
         json!({"status": "success", "access_token": access_token_details.token.unwrap()})
@@ -333,30 +200,18 @@ pub async fn logout_handler(
     cookie_jar: CookieJar,
     Extension(auth_guard): Extension<JWTAuthMiddleware>,
     State(data): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let message = "Token is invalid or session has expired";
-
+) -> Result<impl IntoResponse, Error> {
     let refresh_token = cookie_jar
         .get("refresh_token")
         .map(|cookie| cookie.value().to_string())
-        .ok_or_else(|| {
-            let error_response = serde_json::json!({
-                "status": "fail",
-                "message": message
-            });
-            (StatusCode::FORBIDDEN, Json(error_response))
-        })?;
+        .ok_or_else(|| Error::InvalidToken)?;
 
     let refresh_token_details =
         match token::verify_jwt_token(data.env.refresh_token_public_key.to_owned(), &refresh_token)
         {
             Ok(token_details) => token_details,
             Err(e) => {
-                let error_response = serde_json::json!({
-                    "status": "fail",
-                    "message": format_args!("{:?}", e)
-                });
-                return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
+                return Err(Error::TokenDetailsError(e));
             }
         };
 
@@ -364,13 +219,7 @@ pub async fn logout_handler(
         .redis_client
         .get_async_connection()
         .await
-        .map_err(|e| {
-            let error_response = serde_json::json!({
-                "status": "error",
-                "message": format!("Redis error: {}", e),
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        })?;
+        .map_err(|e| Error::RedisError(e))?;
 
     redis_client
         .del(&[
@@ -378,47 +227,30 @@ pub async fn logout_handler(
             auth_guard.access_token_uuid.to_string(),
         ])
         .await
-        .map_err(|e| {
-            let error_response = serde_json::json!({
-                "status": "error",
-                "message": format_args!("{:?}", e)
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        })?;
+        .map_err(|e| Error::RedisError(e))?;
 
-    let access_cookie = Cookie::build("access_token", "")
+    let access_cookie = Cookie::build(("access_token", ""))
         .path("/")
         .max_age(time::Duration::minutes(-1))
         .same_site(SameSite::Lax)
         .http_only(true)
-        .finish();
-    let refresh_cookie = Cookie::build("refresh_token", "")
+        .build();
+    
+    let refresh_cookie = Cookie::build(("refresh_token", ""))
         .path("/")
         .max_age(time::Duration::minutes(-1))
         .same_site(SameSite::Lax)
         .http_only(true)
-        .finish();
+        .build();
 
-    let logged_in_cookie = Cookie::build("logged_in", "true")
+    let logged_in_cookie = Cookie::build(("logged_in", "true"))
         .path("/")
         .max_age(time::Duration::minutes(-1))
         .same_site(SameSite::Lax)
         .http_only(false)
-        .finish();
+        .build();
 
-    let mut headers = HeaderMap::new();
-    headers.append(
-        header::SET_COOKIE,
-        access_cookie.to_string().parse().unwrap(),
-    );
-    headers.append(
-        header::SET_COOKIE,
-        refresh_cookie.to_string().parse().unwrap(),
-    );
-    headers.append(
-        header::SET_COOKIE,
-        logged_in_cookie.to_string().parse().unwrap(),
-    );
+    let headers = append_cookies_to_headers(vec![access_cookie, refresh_cookie, logged_in_cookie]);
 
     let mut response = Response::new(json!({"status": "success"}).to_string());
     response.headers_mut().extend(headers);
@@ -438,62 +270,76 @@ pub async fn get_me_handler(
     Ok(Json(json_response))
 }
 
-fn filter_user_record(user: &User) -> FilteredUser {
-    FilteredUser {
-        id: user.id.to_string(),
-        email: user.email.to_owned(),
-        name: user.name.to_owned(),
-        photo: user.photo.to_owned(),
-        role: user.role.to_owned(),
-        verified: user.verified,
-        createdAt: user.created_at.unwrap(),
-        updatedAt: user.updated_at.unwrap(),
+#[debug_handler]
+pub async fn google_oauth_handler(
+    query: Query<QueryCode>,
+    State(data): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Error> {
+    let code = &query.code;
+    let state = &query.state;
+
+    if code.is_empty() {
+        return Err(Error::NoAuthCode);
     }
-}
 
-fn generate_token(
-    user_id: uuid::Uuid,
-    max_age: i64,
-    private_key: String,
-) -> Result<TokenDetails, (StatusCode, Json<serde_json::Value>)> {
-    token::generate_jwt_token(user_id, max_age, private_key).map_err(|e| {
-        let error_response = serde_json::json!({
-            "status": "error",
-            "message": format!("error generating token: {}", e),
-        });
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-    })
-}
+    let token_response = request_token(code.as_str(), &data).await;
 
-async fn save_token_data_to_redis(
-    data: &Arc<AppState>,
-    token_details: &TokenDetails,
-    max_age: i64,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let mut redis_client = data
-        .redis_client
-        .get_async_connection()
-        .await
-        .map_err(|e| {
-            let error_response = serde_json::json!({
-                "status": "error",
-                "message": format!("Redis error: {}", e),
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        })?;
-    redis_client
-        .set_ex(
-            token_details.token_uuid.to_string(),
-            token_details.user_id.to_string(),
-            (max_age * 60) as usize,
-        )
-        .await
-        .map_err(|e| {
-            let error_response = serde_json::json!({
-                "status": "error",
-                "message": format_args!("{}", e),
-            });
-            (StatusCode::UNPROCESSABLE_ENTITY, Json(error_response))
-        })?;
-    Ok(())
+    if let Err(e) = token_response {
+        return Err(Error::TokenResponseError(format!("{:?}", e)));
+    }
+
+    let token_response = token_response.unwrap();
+    let google_user = get_google_user(&token_response.access_token, &token_response.id_token).await;
+    if let Err(e) = google_user {
+        return Err(Error::UserResponseError(format!("{:?}", e)));
+    }
+
+    let google_user = google_user.unwrap();
+
+    // find user in db
+    let user = sqlx::query_as!(
+        User,
+        "SELECT * FROM users WHERE email = $1",
+        google_user.email.to_ascii_lowercase()
+    )
+    .fetch_optional(&data.db)
+    .await
+    .map_err(|e| Error::DatabaseError(e))?;
+
+    // insert user if user not exists in db
+    let user = match user {
+        Some(user) => user,
+        None => {
+            sqlx::query_as!(
+                User,
+                "INSERT INTO users (email, name, provider, verified, photo) VALUES ($1, $2, 'Google', $3, $4) RETURNING *",
+                google_user.email.to_ascii_lowercase(),
+                google_user.name,
+                google_user.verified_email,
+                google_user.picture
+            )
+            .fetch_one(&data.db)
+            .await
+            .map_err(|e| {
+                Error::DatabaseError(e)
+            })?
+        }
+    };
+
+    let mut response = auth_first(user, &data).await?;
+    let mut headers = HeaderMap::new();
+
+    //redirect
+    let frontend_origin = data.env.client_origin.to_owned();
+    headers.append(
+        header::LOCATION,
+        format!("{}{}", frontend_origin, state)
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+
+    response.headers_mut().extend(headers);
+
+    Ok(response)
 }

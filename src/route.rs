@@ -9,9 +9,9 @@ use axum::{
 use crate::{
     handler::{
         get_me_handler, health_checker_handler, login_user_handler, logout_handler,
-        refresh_access_token_handler, register_user_handler,
+        refresh_access_token_handler, register_user_handler, google_oauth_handler
     },
-    jwt_auth::auth,
+    utils::auth::auth_request,
     AppState,
 };
 
@@ -21,15 +21,16 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         .route("/api/auth/register", post(register_user_handler))
         .route("/api/auth/login", post(login_user_handler))
         .route("/api/auth/refresh", get(refresh_access_token_handler))
+        .route("/sessions/oauth/google",get(google_oauth_handler))
         .route(
             "/api/auth/logout",
             get(logout_handler)
-                .route_layer(middleware::from_fn_with_state(app_state.clone(), auth)),
+                .route_layer(middleware::from_fn_with_state(app_state.clone(), auth_request)),
         )
         .route(
             "/api/users/me",
             get(get_me_handler)
-                .route_layer(middleware::from_fn_with_state(app_state.clone(), auth)),
+                .route_layer(middleware::from_fn_with_state(app_state.clone(), auth_request)),
         )
         .with_state(app_state)
 }

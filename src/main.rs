@@ -1,12 +1,13 @@
 mod config;
+mod error;
 mod handler;
-mod jwt_auth;
 mod model;
 mod response;
 mod route;
-mod token;
+mod utils;
 
 use config::Config;
+use redis::Client;
 use std::sync::Arc;
 
 use axum::http::{
@@ -14,17 +15,16 @@ use axum::http::{
     HeaderValue, Method,
 };
 use dotenv::dotenv;
-use redis::Client;
 use route::create_router;
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{Pool, Postgres};
 use tower_http::cors::CorsLayer;
 
 pub struct AppState {
-    db: Pool<Postgres>,
-    env: Config,
-    redis_client: Client,
+    pub db: Pool<Postgres>,
+    pub env: Config,
+    pub redis_client: Client,
 }
-
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -71,8 +71,6 @@ async fn main() {
     .layer(cors);
 
     println!("🚀 Server started successfully");
-    axum::Server::bind(&"0.0.0.0:8000".parse().unwrap())
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
+    axum::serve(listener, app).await.unwrap()
 }
