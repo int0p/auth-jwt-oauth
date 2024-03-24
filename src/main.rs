@@ -8,6 +8,8 @@ mod utils;
 
 use config::Config;
 use redis::Client;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 use std::sync::Arc;
 
 use axum::http::{
@@ -19,12 +21,54 @@ use route::create_router;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres};
 use tower_http::cors::CorsLayer;
+use utoipa::{
+    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+    Modify
+};
+use utoipa_rapidoc::RapiDoc;
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        handler::health_checker_handler,
+        handler::register_user_handler,
+        handler::login_user_handler,
+        handler::logout_handler,
+        handler::get_me_handler,
+    ),
+    components(
+        schemas(model::FilterUser,model::UserData,model::UserResponse,model::RegisterUserSchema, model::LoginUserSchema,error::ErrorResponse,model::LoginUserResponse),
+    ),
+    tags(
+        (name = "Rust REST API", description = "Authentication in Rust Endpoints")
+    ),
+    modifiers(&SecurityAddon)
+)]
+struct ApiDoc;
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "token",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .bearer_format("JWT")
+                        .build(),
+                ),
+            )
+        }
+    }
+}
 pub struct AppState {
     pub db: Pool<Postgres>,
     pub env: Config,
     pub redis_client: Client,
 }
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -57,6 +101,7 @@ async fn main() {
         }
     };
 
+
     let cors = CorsLayer::new()
         .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
@@ -68,6 +113,8 @@ async fn main() {
         env: config.clone(),
         redis_client: redis_client.clone(),
     }))
+    .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+    .merge(RapiDoc::new("/api-docs/openapi.json").path("/rapidoc"))
     .layer(cors);
 
     println!("🚀 Server started successfully");

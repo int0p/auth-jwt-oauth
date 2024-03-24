@@ -61,7 +61,7 @@ pub async fn save_token_data_to_redis(
 ) -> Result<(), Error> {
     let mut redis_client = data
         .redis_client
-        .get_async_connection()
+        .get_multiplexed_async_connection()
         .await
         .map_err(|e| Error::RedisError(e))?;
     redis_client
@@ -169,7 +169,7 @@ pub async fn auth_request(
 
     let mut redis_client = data
         .redis_client
-        .get_async_connection()
+        .get_multiplexed_async_connection()
         .await
         .map_err(|e| Error::RedisError(e))?;
 

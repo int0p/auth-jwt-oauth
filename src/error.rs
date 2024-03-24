@@ -1,4 +1,5 @@
 use argon2::password_hash;
+use utoipa::ToSchema;
 
 use axum::{
     http::StatusCode,
@@ -30,7 +31,7 @@ pub enum Error {
     VerifyTokenError(jsonwebtoken::errors::Error),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize,ToSchema)]
 pub struct ErrorResponse {
     pub status: String,
     pub message: String,

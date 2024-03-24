@@ -29,6 +29,17 @@ use crate::{
 
 use redis::AsyncCommands;
 
+#[utoipa::path(
+    get,
+    path = "/api/healthchecker",
+    tag = "Health Checker Endpoint",
+    responses(
+        (status = 200, description= "Authenticated User"),       
+    ),
+    security(
+        ("token" = [])
+    )
+)]
 pub async fn health_checker_handler() -> impl IntoResponse {
     const MESSAGE: &str = "Rust and Axum Framework: JWT Access and Refresh Tokens";
 
@@ -40,6 +51,19 @@ pub async fn health_checker_handler() -> impl IntoResponse {
     Json(json_response)
 }
 
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/register",
+    tag = "Register Account Endpoint",
+    request_body(content = RegisterUserSchema, description = "Credentials to create account", example = json!({"email": "johndoe@example.com","name": "John Doe","password": "password123","passwordConfirm": "password123"})),
+    responses(
+        (status=201, description= "Account created successfully", body= RegisterUserSchema ),
+        (status=400, description= "Validation Errors", body= ErrorResponse),
+        (status=409, description= "User with email already exists", body= ErrorResponse),
+        (status=500, description= "Internal Server Error", body= ErrorResponse ),
+    )
+)]
 pub async fn register_user_handler(
     State(data): State<Arc<AppState>>,
     Json(body): Json<RegisterUserSchema>,
@@ -82,6 +106,17 @@ pub async fn register_user_handler(
     Ok(Json(user_response))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    tag = "Login Endpoint",
+    request_body(content = LoginUserSchema, description = "Credentials to log in to your account", example = json!({"email": "johndoe@example.com","password": "password123"})),
+    responses(
+        (status=200, description= "Login successfull", body= LoginUserResponse ),
+        (status=400, description= "Validation Errors", body= ErrorResponse ),
+        (status=500, description= "Internal Server Error", body= ErrorResponse ),
+    )
+)]
 pub async fn login_user_handler(
     State(data): State<Arc<AppState>>,
     Json(body): Json<LoginUserSchema>,
@@ -136,7 +171,7 @@ pub async fn refresh_access_token_handler(
 
     let mut redis_client = data
         .redis_client
-        .get_async_connection()
+        .get_multiplexed_async_connection()
         .await
         .map_err(|e| Error::RedisError(e))?;
 
@@ -196,6 +231,20 @@ pub async fn refresh_access_token_handler(
     Ok(response)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "Logout Endpoint",
+    responses(
+        (status=200, description= "Logout successfull" ),
+        (status=400, description= "Validation Errors", body= ErrorResponse ),
+        (status=401, description= "Unauthorize Error", body= ErrorResponse),
+        (status=500, description= "Internal Server Error", body= ErrorResponse ),
+    ),
+    security(
+       ("token" = [])
+   )
+)]
 pub async fn logout_handler(
     cookie_jar: CookieJar,
     Extension(auth_guard): Extension<JWTAuthMiddleware>,
@@ -217,7 +266,7 @@ pub async fn logout_handler(
 
     let mut redis_client = data
         .redis_client
-        .get_async_connection()
+        .get_multiplexed_async_connection()
         .await
         .map_err(|e| Error::RedisError(e))?;
 
@@ -257,6 +306,19 @@ pub async fn logout_handler(
     Ok(response)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/users/me",
+    tag = "Get Authenticated User Endpoint",
+    responses(
+        (status = 200, description= "Authenticated User", body = UserResponse),
+        (status= 500, description= "Internal Server Error", body = ErrorResponse )
+       
+    ),
+    security(
+       ("token" = [])
+   )
+)]
 pub async fn get_me_handler(
     Extension(jwtauth): Extension<JWTAuthMiddleware>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -270,7 +332,6 @@ pub async fn get_me_handler(
     Ok(Json(json_response))
 }
 
-#[debug_handler]
 pub async fn google_oauth_handler(
     query: Query<QueryCode>,
     State(data): State<Arc<AppState>>,

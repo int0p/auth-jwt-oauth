@@ -15,6 +15,7 @@ use crate::{
     AppState,
 };
 
+
 pub fn create_router(app_state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/healthchecker", get(health_checker_handler))
@@ -24,7 +25,7 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         .route("/sessions/oauth/google",get(google_oauth_handler))
         .route(
             "/api/auth/logout",
-            get(logout_handler)
+            post(logout_handler)
                 .route_layer(middleware::from_fn_with_state(app_state.clone(), auth_request)),
         )
         .route(
