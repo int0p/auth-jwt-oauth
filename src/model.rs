@@ -9,7 +9,7 @@ pub struct User {
     pub id: uuid::Uuid,
     pub name: String,
     pub email: String,
-    pub password: String,
+    pub password: Option<String>,
     pub role: String,
     pub photo: String,
     pub verified: bool,

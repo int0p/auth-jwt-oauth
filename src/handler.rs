@@ -135,13 +135,17 @@ pub async fn login_user_handler(
         return Err(Error::WrongUserProvider);
     }
 
-    let is_valid = match PasswordHash::new(&user.password) {
-        Ok(parsed_hash) => Argon2::default()
-            .verify_password(body.password.as_bytes(), &parsed_hash)
-            .map_or(false, |_| true),
-        Err(_) => false,
+    let is_valid = match user.password.as_ref() {
+        Some(password) => {
+            match PasswordHash::new(password) {
+                Ok(parsed_hash) => Argon2::default()
+                    .verify_password(body.password.as_bytes(), &parsed_hash)
+                    .is_ok(),
+                Err(_) => false,
+            }
+        },
+        None => false,  // provider가 google일 땐 pw가 없고, local일 땐 반드시 존재.
     };
-
     if !is_valid {
         return Err(Error::InvalidLoginInfo);
     }
