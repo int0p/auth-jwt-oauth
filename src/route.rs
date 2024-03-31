@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     middleware,
-    routing::{get, post},
+    routing::{get, post,delete},
     Router,
 };
 
@@ -25,7 +25,7 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         .route("/api/sessions/oauth/google",get(google_oauth_handler))
         .route(
             "/api/auth/logout",
-            post(logout_handler)
+            delete(logout_handler)
                 .route_layer(middleware::from_fn_with_state(app_state.clone(), auth_request)),
         )
         .route(

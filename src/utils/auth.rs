@@ -96,6 +96,13 @@ pub async fn auth_first(user: User, data: &Arc<AppState>) -> Result<Response<Str
     )
     .await?;
 
+    /*
+    HttpOnly 플래그: 이 플래그를 사용하면 JavaScript를 통한 쿠키의 접근을 차단할 수 있습니다. 따라서 XSS 공격으로부터 토큰을 보호할 수 있습니다. refresh_token은 특히 HttpOnly 플래그를 사용하여 저장해야 합니다.
+
+    Secure 플래그: 이 플래그는 쿠키가 오직 HTTPS를 통해서만 전송되도록 합니다. 이는 중간자 공격을 방지하는 데 도움이 됩니다.
+
+    SameSite 플래그: 이 설정은 쿠키가 cross-site 요청에 대해 어떻게 동작해야 하는지를 브라우저에 알려줍니다. SameSite=Lax 또는 SameSite=Strict를 설정하여 CSRF 공격을 방지할 수 있습니다.
+     */
     let access_cookie = Cookie::build((
         "access_token",
         access_token_details.token.clone().unwrap_or_default(),

@@ -22,6 +22,8 @@ sqlx = { version = "0.7.3", features = ["runtime-async-std-native-tls", "postgre
 time = "0.3.20"
 tokio = { version = "1.27.0", features = ["full"] }
 tower-http = { version = "0.5.0", features = ["cors"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 utoipa = { version = "4.2.0", features = ["chrono", "axum_extras"] }
 utoipa-rapidoc = { version = "3.0.0", features = ["axum"] }
 utoipa-swagger-ui = { version = "6.0.0", features = ["axum"] }

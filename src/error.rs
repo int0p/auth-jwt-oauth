@@ -23,7 +23,7 @@ pub enum Error {
     InvalidToken,
     NoUser,
     NoAuthCode,
-    RetriveTokenError,
+    RetrieveTokenError(String),
     RetriveUserError,
     TokenResponseError(String),
     UserResponseError(String),
@@ -145,11 +145,11 @@ impl IntoResponse for Error {
                     message: "Authorization code not provided!".to_string(),
                 },
             ),            
-            Error::RetriveTokenError => (
+            Error::RetrieveTokenError(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorResponse {
                     status: "fail".to_string(),
-                    message: "An error occurred while trying to retrieve access token.".to_string(),
+                    message: format!("{:?}", e),
                 },
             ),
             Error::RetriveUserError => (

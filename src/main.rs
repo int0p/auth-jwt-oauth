@@ -11,7 +11,7 @@ use redis::Client;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 use std::sync::Arc;
-
+use tracing_subscriber::EnvFilter;
 use axum::http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
     HeaderValue, Method,
@@ -75,6 +75,11 @@ async fn main() {
 
     let config = Config::init();
 
+    tracing_subscriber::fmt()
+    .without_time() // For early local development.
+    .with_target(false)
+    .with_env_filter(EnvFilter::from_default_env())
+    .init();
     let pool = match PgPoolOptions::new()
         .max_connections(10)
         .connect(&config.database_url)

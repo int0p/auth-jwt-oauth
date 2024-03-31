@@ -14,6 +14,7 @@ use axum_extra::extract::{
 };
 use rand_core::OsRng;
 use serde_json::json;
+use tracing::info;
 
 use crate::{
     error::Error,
@@ -68,9 +69,10 @@ pub async fn register_user_handler(
     State(data): State<Arc<AppState>>,
     Json(body): Json<RegisterUserSchema>,
 ) -> Result<impl IntoResponse, Error> {
+    info!("start register user");
     // email로 user검색
     let user_exists: Option<bool> =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 )")
             .bind(body.email.to_owned().to_ascii_lowercase())
             .fetch_one(&data.db)
             .await
@@ -236,7 +238,7 @@ pub async fn refresh_access_token_handler(
 }
 
 #[utoipa::path(
-    post,
+    delete,
     path = "/api/auth/logout",
     tag = "Logout Endpoint",
     responses(
@@ -340,6 +342,7 @@ pub async fn google_oauth_handler(
     query: Query<QueryCode>,
     State(data): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Error> {
+    info!("start google login");
     let code = &query.code;
     let state = &query.state;
 
@@ -364,7 +367,7 @@ pub async fn google_oauth_handler(
     // find user in db
     let user = sqlx::query_as!(
         User,
-        "SELECT * FROM users WHERE email = $1",
+        "SELECT * FROM users WHERE email = $1 ",
         google_user.email.to_ascii_lowercase()
     )
     .fetch_optional(&data.db)
@@ -373,7 +376,13 @@ pub async fn google_oauth_handler(
 
     // insert user if user not exists in db
     let user = match user {
-        Some(user) => user,
+        Some(user) => {
+            if user.provider != "Google" {
+                return Err(Error::WrongUserProvider);
+            }else{
+                user
+            }
+        }
         None => {
             sqlx::query_as!(
                 User,
@@ -405,6 +414,5 @@ pub async fn google_oauth_handler(
     );
 
     response.headers_mut().extend(headers);
-
     Ok(response)
 }
